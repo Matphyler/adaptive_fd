@@ -2,6 +2,9 @@ import numpy as np
 from typing import Union, Optional, Tuple
 import math
 import re
+import click
+import logging
+import sys
 
 
 class Polynomial:
@@ -11,6 +14,7 @@ class Polynomial:
         self.order: int = coeff.shape[0] - 1
         self.coeff: np.ndarray = coeff
         self._repr_str: Optional[str] = None
+        self._d_coeff = {0: self.coeff}
 
     def __call__(self, x: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
         x_ = np.asarray(x)
@@ -35,6 +39,17 @@ class Polynomial:
                 x_str = f"x^{o}"
 
             return sign, f"{c_str} {x_str}".strip()
+
+    def d_coeff(self, n: int = 0):
+        if not isinstance(n, int) and n >= 0:
+            raise ValueError("n must be a non-negative integer!")
+        if n == 0:
+            return self.coeff
+        elif n not in self._d_coeff:
+            coeff = self.d_coeff(n - 1)
+            coeff = coeff * np.arange(len(coeff))
+            self._d_coeff[n] = coeff[1:]
+        return self._d_coeff[n]
 
     def __repr__(self) -> str:
         if self._repr_str is None:
@@ -72,14 +87,6 @@ class Polynomial:
             string=s
         ).strip()
 
-    def _derivative(self) -> "Polynomial":
-        if self.order == 0:
-            return Polynomial([0.])
-        else:
-            coeff = np.array(self.coeff)
-            coeff *= np.arange(self.order + 1)
-            return Polynomial(coeff[1:])
-
     def D(self, n: int = 1) -> "Polynomial":
         """
         n-th order derivatives
@@ -92,11 +99,7 @@ class Polynomial:
         if n == 0:
             return self
         else:
-            g = self._derivative()
-            if n > 1:
-                for _ in range(n-1):
-                    g = g._derivative()
-            return g
+            return Polynomial(self.d_coeff(n))
 
     def _test_derivatives(self, x: float, n: int = 3, eps: float = 1E-8):
 
@@ -118,3 +121,27 @@ class Polynomial:
         eps_array = eps ** np.arange(n + 1)
 
         return self.__call__(x + eps) - d_array.dot(eps_array)
+
+@click.command()
+@click.option("-o", "--order", type=int, help="order of polynomial")
+@click.option("-l", "--lower_bound", type=float, default=-1.0, help="lower bound of the coefficient of the polynomial")
+@click.option("-u", "--upper_bound", type=float, default=1.0, help="upper bound of the coefficient of the polynomial")
+@click.option("-n", "--taylor_order", type=int, default=2, help="order of Taylor model")
+def main(order: int, lower_bound: float, upper_bound: float, taylor_order: int):
+
+    logger = logging.getLogger("polynomial")
+    logger.setLevel(logging.INFO)
+    handler = logging.StreamHandler(sys.stderr)
+    logger.addHandler(handler)
+
+    coeff = np.random.uniform(low=lower_bound, high=upper_bound, size=order+1)
+    poly = Polynomial(coeff)
+    x = np.random.uniform(low=lower_bound, high=upper_bound)
+    logger.info(f"f(x) = {poly.__repr__()}")
+    logger.info(f"x = {x}")
+    for o in reversed(range(-8, 0)):
+        logger.info("1E{}\t{:+.3E}\t{:+.3E}\t{:+.3E}\t{:+.3E}".format(o, poly._test_derivatives(x, 1, eps=10 ** o), poly._test_derivatives(x, 2, eps=10 ** o), poly._test_derivatives(x, 3, eps=10 ** o), poly._test_derivatives(x, 4, eps=10 ** o)))
+
+
+if __name__ == "__main__":
+    main()

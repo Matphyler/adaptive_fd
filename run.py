@@ -1,6 +1,6 @@
-from AdaptiveFD import *
-from Polynomial import *
-from InjectNoise import *
+from adaptive_fd import *
+from polynomial import *
+from inject_noise import *
 import pandas as pd
 from matplotlib import rc_context
 from matplotlib import pyplot as plt
@@ -31,8 +31,7 @@ def run_test_single_polynomial(poly_coeff_bd: Tuple[float, float] = (-10., 10.),
 polynomial coefficient bound: [{poly_coeff_l:.3e}, {poly_coeff_u:.3e}]
 polynomial order: {poly_order}
 x_range: [{x_range_l:.3E}, {x_range_u:.3E}]
-error range: 1E{err_l} to 1E{err_u}
-        """.format(
+error range: 1E{err_l} to 1E{err_u}""".format(
             poly_coeff_l=poly_coeff_bd[0],
             poly_coeff_u=poly_coeff_bd[1],
             poly_order=poly_order,
@@ -63,8 +62,7 @@ error range: 1E{err_l} to 1E{err_u}
 0-th order (f(x)):     {:.3E} 
 1-st order (grad(x)):  {:.3E}
 2-nd order (abs val):  {:.3E} 
-3-rd order (abs val):  {:.3E}
-        """.format(D0, D1, D2, D3)
+3-rd order (abs val):  {:.3E}""".format(D0, D1, D2, D3)
     )
 
     if D2 < l_lower_bd:
