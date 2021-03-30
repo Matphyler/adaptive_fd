@@ -1,11 +1,28 @@
 import sympy as sp
 import numpy as np
 from matplotlib import pyplot as plt, rc_context
-from typing import Optional
+from typing import Optional, Callable
+from estimating_scheme import EstimatingScheme
+import sys
 
 
 class ObjFunc:
-    def __init__(self, expr: sp.core.expr.Expr, eps_f: float) -> None:
+
+    @staticmethod
+    def _deterministic_noise(x):
+        def _my_hash(z):
+            magic_number = 114509728
+            z_hash = z.__hash__()
+            return (z_hash ** 2 + magic_number) % sys.hash_info.modulus
+
+        x_hash = x
+        for i in range(10):
+            x_hash = _my_hash(x_hash)
+
+        return 2. * (x_hash / sys.hash_info.modulus) - 1.
+
+    def __init__(self, expr: sp.core.expr.Expr, eps_f: float, enable_cache: bool = True,
+                 deterministic: bool = False) -> None:
 
         if len(expr.free_symbols) != 1:
             raise ValueError("expr must be a SymPy expression with only one free symbol.")
@@ -25,9 +42,17 @@ class ObjFunc:
         self.hess = sp.lambdify(self.x, self.hess_expr, "numpy")
 
         self.num_eval = 0
-        self.call_history = []
+        # self.call_history = []
 
         self._last_ls_history = []
+
+        self.enable_cache = enable_cache
+        self._cache = {}
+
+        self.deterministic = deterministic
+
+    def _clear_cache(self):
+        self._cache = {}
 
     def __call__(self, x: float) -> float:
         """
@@ -37,50 +62,69 @@ class ObjFunc:
         :return: noisy function
         """
 
+        if self.enable_cache:
+            if x in self._cache:
+                return self._cache[x]
+
         self.num_eval += 1
 
-        noise = self.eps_f * np.random.uniform(low=-1.0, high=1.0)
+        if not self.deterministic:
+            noise = self.eps_f * np.random.uniform(low=-1.0, high=1.0)
+        else:
+            # deterministic noise
+            raw_noise = self._deterministic_noise(x)
+            noise = self.eps_f * raw_noise
+
         f_true = self.f(x)
         f_noise = f_true + noise
 
-        self.call_history.append({'x': x, 'noise': noise, 'f_true': f_true, 'f_noise': f_noise})
+        # self.call_history.append({'x': x, 'noise': noise, 'f_true': f_true, 'f_noise': f_noise})
 
-        return self.f(x) + noise
+        res = self.f(x) + noise
 
-    def eps_g(self, x: float, h: float, mode='forward'):
-        return np.abs((self.f(x + h) - self.f(x)) / h - self.g(x)) + 2 * self.eps_f / h
+        if self.enable_cache:
+            self._cache[x] = res
 
-    def reset(self) -> None:
-        self.num_eval = 0
-        self.call_history = []
+        return res
 
-    def adafd(self, x: float,
-              mode: str = 'forward',
-              max_iter: int = 30,
-              r_lower: float = 3.,
-              r_upper: float = 7.,
-              h_init: Optional[float] = None,
-              h_max: float = 1E10,
-              h_min: float = 1E-16):
+    def _ada_general(self,
+                     x: float,
+                     r_lower: float,
+                     r_upper: float,
+                     shift: np.ndarray,
+                     coeff: np.ndarray,
+                     h_init: float,
+                     max_iter: int = 30,
+                     eps_f: Optional[float] = None,
+                     h_max: float = 1E10,
+                     h_min: float = 1E-16,
+                     save_history: bool = True,
+                     est_order: Optional[int] = None,
+                     est_shift: Optional[np.ndarray] = None,
+                     est_coeff: Optional[np.ndarray] = None,
+                     est_h_power: Optional[int] = None,
+                     scheme_name: Optional[str] = None,
+                     ):
 
-        eps_f = self.eps_f
+        if save_history:
+            history = []
+        else:
+            history = None
+
+        num_eval = self.num_eval
+
+        if eps_f is None:
+            eps_f = self.eps_f
+
         assert eps_f > 0., "eps_f must be positive"
         assert max_iter > 0, "max iter must be positive"
 
-        if mode[0] in {'f', 'F'}:
-            forward_mode = True
-        elif mode[0] in {'c', 'C'}:
-            forward_mode = False
+        if est_order is not None:
+            acc = sp.lambdify(self.x, sp.diff(self.f_expr, self.x, est_order), "numpy")(x)
         else:
-            raise ValueError("only forward and central modes are supported")
+            acc = None
 
-        self._last_ls_history = []
-        num_eval = self.num_eval
-
-        if h_init is None:
-            h = 2.0 * np.sqrt(eps_f)
-        else:
-            h = h_init
+        h = h_init
 
         u = np.inf
         l = 0.
@@ -88,49 +132,29 @@ class ObjFunc:
         flag = 0
         n_iter = 0
 
-        fh, f2h, fhf, fhb = np.nan, np.nan, np.nan, np.nan
+        if self.enable_cache:
+            self._clear_cache()
 
-        f0 = self.__call__(x)  # f(x)
+        f_vals = np.array([self.__call__(x + s * h) for s in shift])
 
-        if forward_mode:
-            fh = self.__call__(x + h)  # f(x+h)
-            f2h = self.__call__(x + 2 * h)  # f(x+2h)
-        else:
-            fhf = self.__call__(x + h)
-            fhb = self.__call__(x - h)
+        r = None
 
         for n_iter in range(max_iter):
 
-            if forward_mode:
-                r = np.abs(f2h - 2. * fh + f0) / (2. * eps_f)
+            r = np.abs(f_vals.dot(coeff) / eps_f)
 
-                self._last_ls_history.append(
-                    dict(
-                        r=r,
-                        h=h,
-                        fh=fh,
-                        f2h=f2h,
-                        u=u,
-                        l=l
-                    )
+            if save_history:
+                history_entry = dict(
+                    h=h,
+                    r=r,
+                    f_vals=f_vals
                 )
-            else:
-                r = np.abs(fhf - 2. * f0 + fhb) / (2. * eps_f)
-                self._last_ls_history.append(
-                    dict(
-                        r=r,
-                        h=h,
-                        fhf=fhf,
-                        fhb=fhb,
-                        u=u,
-                        l=l
-                    )
-                )
+                history.append(history_entry)
 
-            if r < r_lower:
-                l = h
-            elif r > r_upper:
+            if r > r_upper:
                 u = h
+            elif r < r_lower:
+                l = h
             else:
                 break
 
@@ -145,74 +169,143 @@ class ObjFunc:
             else:
                 h = h_new
 
-            if not forward_mode:
-                fhf = self.__call__(x + h)
-                fhb = self.__call__(x - h)
-            else:
-                if np.isinf(u):
-                    fh = f2h
-                    f2h = self.__call__(x + 2*h)
-                elif l == 0.:
-                    f2h = fh
-                    fh = self.__call__(x + h)
-                else:
-                    fh = self.__call__(x + h)
-                    f2h = self.__call__(x + 2*h)
+            f_vals = np.array([self.__call__(x + s * h) for s in shift])
 
         else:
-            flag = -1  # max iter reached
+            flag = -1
 
-        if forward_mode:
-            g_est = (fh - f0) / h
+        num_eval = self.num_eval - num_eval
+
+        if est_coeff is not None and est_shift is not None and est_h_power is not None:
+            estimated = np.array([self.__call__(x + s * h) for s in est_shift]).dot(est_coeff) / (h ** est_h_power)
         else:
-            g_est = (fhf - f0) / h
+            estimated = None
 
-        g_acc = self.g(x)
-        eps_g = np.abs(g_est - g_acc)
+        if estimated is not None and acc is not None:
 
-        return {'LS_flag': flag, 'h': h, 'n_iter': n_iter + 1, 'g_est': g_est, 'g_acc': g_acc, 'eps_g': eps_g, 'r': r,
-                'num_eval': self.num_eval - num_eval}
+            error = np.abs(estimated - acc)
+            rel_error = error / np.abs(acc)
+        else:
+            error = None
+            rel_error = None
 
-    def gen_plot(self, x: float, h_lower=1E-5, h_upper=10., base=1.1, dpi=400, extra_args=None):
+        return_dict = dict(
+            scheme=scheme_name,
+            LS_flag=flag,
+            h=h,
+            r=r,
+            n_iter=n_iter + 1,
+            num_eval=num_eval,
+            estimated=estimated,
+            acc=acc,
+            error=error,
+            rel_error=rel_error,
+            eps_f=eps_f,
+            r_l=r_lower,
+            r_u=r_upper
+        )
 
-        if extra_args is None:
-            extra_args = {}
+        if save_history:
+            self._last_ls_history = history
 
-        cmode = self.adafd(x=x, mode='C', **(extra_args.get('forward', {})))
-        fmode = self.adafd(x=x, mode='F', **(extra_args.get('central', {})))
+        return return_dict
+
+    def ada_est(self,
+                x: float,
+                scheme: EstimatingScheme,
+                max_iter: int = 30,
+                eps_f: Optional[float] = None,
+                h_max: float = 1E10,
+                h_min: float = 1E-16,
+                save_history: bool = True,
+                ):
+
+        if eps_f is None:
+            eps_f = self.eps_f
+
+        if scheme.h_init_func is None:
+            h_init = eps_f
+        else:
+            h_init = scheme.h_init_func(eps_f)
+
+        return self._ada_general(
+            x=x,
+            r_lower=scheme.r_lower,
+            r_upper=scheme.r_upper,
+            shift=scheme.r_shift,
+            coeff=scheme.r_coeff,
+            h_init=h_init,
+            max_iter=max_iter,
+            eps_f=eps_f,
+            h_max=h_max,
+            h_min=h_min,
+            save_history=save_history,
+            est_order=scheme.est_order,
+            est_shift=scheme.est_shift,
+            est_coeff=scheme.est_coeff,
+            est_h_power=scheme.est_h_power,
+            scheme_name=scheme.name
+        )
+
+    def ada_est_gen_plot(
+            self,
+            x: float,
+            scheme: EstimatingScheme,
+            eps_f: Optional[float] = None,
+            h_lower=1E-5,
+            h_upper=10.,
+            base=1.1,
+            dpi=400,
+            num_samples=1,
+            **extra_args,
+    ) -> None:
+
+        ada_res = [self.ada_est(x=x, scheme=scheme, eps_f=eps_f, **extra_args) for i in range(num_samples)]
+
+        eps_f = ada_res[0]["eps_f"]
+
+        h_ada = [res['h'] for res in ada_res]
 
         index_lower = int(np.floor(np.log(h_lower) / np.log(base)))
         index_upper = int(np.ceil(np.log(h_upper) / np.log(base)))
 
-        h = base ** np.arange(index_lower, index_upper + 1)
-        eps_g = np.array([self.eps_g(x=x, h=i) for i in h])
+        hs = base ** np.arange(index_lower, index_upper + 1)
 
-        h_th = 2 * np.sqrt(self.eps_f / np.abs(self.hess(x)))
+        true_vale = ada_res[0]["acc"]
+
+        def worst_case_func(h):
+            return (np.abs(scheme.est(obj=self.f, x=x, h=h) - true_vale) + np.abs(scheme.est_coeff).sum() * eps_f / (
+                        h ** scheme.est_h_power)) / np.abs(true_vale)
+
+        worst_case_err = [worst_case_func(h) for h in hs]
 
         with rc_context(rc={'figure.dpi': dpi}):
-            fig, ax = plt.subplots()
+            ax = plt.gca()
 
             color = next(ax._get_lines.prop_cycler)['color']
-            ax.axvline(fmode['h'], linestyle='--', color=color, label="adaFD (forward mode, h={:.2E})".format(fmode['h']))
-            ax.scatter([fmode['h']], [self.eps_g(x=x, h=fmode['h'])], color=color)
+            if num_samples == 1:
+                label_str = "{} (h={:.2E})".format(scheme.name, ada_res[0]['h'])
+                alpha = 1.0
+                linestyle='--'
+            else:
+                label_str = "{} (h in {:.2E}~{:.2E}".format(scheme.name, min(h_ada), max(h_ada))
+                alpha = .3
+                linestyle = '-'
+            for i, h in enumerate(h_ada):
+                if i == 0:
+                    ax.axvline(h, linestyle=linestyle, color=color, alpha=alpha, label=label_str)
+                else:
+                    ax.axvline(h, linestyle=linestyle, color=color, alpha=alpha)
+            ax.scatter(h_ada, [worst_case_func(h) for h in h_ada], color=color)
 
-            color = next(ax._get_lines.prop_cycler)['color']
-            ax.axvline(cmode['h'], linestyle='--', color=color, label="adaFD (central mode, h={:.2E})".format(cmode['h']))
-            ax.scatter([cmode['h']], [self.eps_g(x=x, h=cmode['h'])], color=color)
-
-            color = next(ax._get_lines.prop_cycler)['color']
-            ax.axvline(h_th, linestyle='--', color=color,
-                       label="computed by L (h={:.2E})".format(h_th))
-            ax.scatter([h_th], [self.eps_g(x=x, h=h_th)], color=color)
-
-            color = next(ax._get_lines.prop_cycler)['color']
-            ax.plot(h, eps_g, label='worst case', color=color)
+            # color = next(ax._get_lines.prop_cycler)['color']
+            ax.plot(hs, worst_case_err,
+                    # label='{}: worst case'.format(scheme.name),
+                    color=color)
 
             plt.xscale('log')
             plt.yscale('log')
             plt.title(f"$f(x) = {sp.latex(self.f_expr)}, x={x}, \\epsilon_f = {self.eps_f}$")
-            plt.xlabel("finite difference interval $h$")
-            plt.ylabel("$\\epsilon_g$")
+            plt.xlabel("scaling factor $h$")
+            plt.ylabel("worst case relative error")
             plt.legend()
-
-        return h, eps_g

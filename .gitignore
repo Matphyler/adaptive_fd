@@ -1,4 +1,6 @@
 output/
+figs/
+.idea/
 
 # General
 .DS_Store
