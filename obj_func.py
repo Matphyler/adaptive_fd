@@ -1,15 +1,25 @@
-import sympy as sp
-import numpy as np
-from matplotlib import pyplot as plt, rc_context
-from typing import Optional, Callable
-from estimating_scheme import EstimatingScheme
+import math
 import sys
+from typing import Optional
+
+import numpy as np
+import sympy as sp
+from matplotlib import pyplot as plt, rc_context
+
+from ada_est_res import AdaEstRes
+from estimating_scheme import EstimatingScheme
 
 
 class ObjFunc:
 
     @staticmethod
-    def _deterministic_noise(x):
+    def _deterministic_noise(x: float) -> float:
+        """
+        Return noise between [-1, 1] that is
+        deterministic in x
+        :param x:
+        :return:
+        """
         def _my_hash(z):
             magic_number = 114509728
             z_hash = z.__hash__()
@@ -22,7 +32,7 @@ class ObjFunc:
         return 2. * (x_hash / sys.hash_info.modulus) - 1.
 
     def __init__(self, expr: sp.core.expr.Expr, eps_f: float, enable_cache: bool = True,
-                 deterministic: bool = False) -> None:
+                 deterministic: bool = True) -> None:
 
         if len(expr.free_symbols) != 1:
             raise ValueError("expr must be a SymPy expression with only one free symbol.")
@@ -42,6 +52,7 @@ class ObjFunc:
         self.hess = sp.lambdify(self.x, self.hess_expr, "numpy")
 
         self.num_eval = 0
+        self.num_eval_no_cache = 0
         # self.call_history = []
 
         self._last_ls_history = []
@@ -51,7 +62,7 @@ class ObjFunc:
 
         self.deterministic = deterministic
 
-    def _clear_cache(self):
+    def _clear_cache(self) -> None:
         self._cache = {}
 
     def __call__(self, x: float) -> float:
@@ -61,6 +72,8 @@ class ObjFunc:
         :param x: float, the value at which to evaluate the function
         :return: noisy function
         """
+
+        self.num_eval_no_cache += 1
 
         if self.enable_cache:
             if x in self._cache:
@@ -75,8 +88,8 @@ class ObjFunc:
             raw_noise = self._deterministic_noise(x)
             noise = self.eps_f * raw_noise
 
-        f_true = self.f(x)
-        f_noise = f_true + noise
+        # f_true = self.f(x)
+        # f_noise = f_true + noise
 
         # self.call_history.append({'x': x, 'noise': noise, 'f_true': f_true, 'f_noise': f_noise})
 
@@ -87,24 +100,33 @@ class ObjFunc:
 
         return res
 
-    def _ada_general(self,
-                     x: float,
-                     r_lower: float,
-                     r_upper: float,
-                     shift: np.ndarray,
-                     coeff: np.ndarray,
-                     h_init: float,
-                     max_iter: int = 30,
-                     eps_f: Optional[float] = None,
-                     h_max: float = 1E10,
-                     h_min: float = 1E-16,
-                     save_history: bool = True,
-                     est_order: Optional[int] = None,
-                     est_shift: Optional[np.ndarray] = None,
-                     est_coeff: Optional[np.ndarray] = None,
-                     est_h_power: Optional[int] = None,
-                     scheme_name: Optional[str] = None,
-                     ):
+    def ada_est(self,
+                x: float,
+                scheme: EstimatingScheme,
+                max_iter: int = 30,
+                eps_f: Optional[float] = None,
+                h_max: float = 1E10,
+                h_min: float = 1E-16,
+                r_lower: Optional[float] = None,
+                r_upper: Optional[float] = None,
+                save_history: bool = True,
+                ) -> AdaEstRes:
+
+        if eps_f is None:
+            eps_f = self.eps_f
+
+        if scheme.h_init_func is None:
+            h_init = eps_f
+        else:
+            h_init = scheme.h_init_func(eps_f)
+
+        est_order: int = scheme.est_order
+        if r_upper is None:
+            r_upper = scheme.r_upper
+        if r_lower is None:
+            r_lower = scheme.r_lower
+
+        h_opt = self.optimal_h(x=x, scheme=scheme, eps_f=eps_f)
 
         if save_history:
             history = []
@@ -112,6 +134,7 @@ class ObjFunc:
             history = None
 
         num_eval = self.num_eval
+        num_eval_no_cache = self.num_eval_no_cache
 
         if eps_f is None:
             eps_f = self.eps_f
@@ -135,13 +158,13 @@ class ObjFunc:
         if self.enable_cache:
             self._clear_cache()
 
-        f_vals = np.array([self.__call__(x + s * h) for s in shift])
+        f_vals = np.array([self.__call__(x + s * h) for s in scheme.r_shift])
 
-        r = None
+        r = np.nan
 
         for n_iter in range(max_iter):
 
-            r = np.abs(f_vals.dot(coeff) / eps_f)
+            r = np.abs(f_vals.dot(scheme.r_coeff) / eps_f)
 
             if save_history:
                 history_entry = dict(
@@ -150,6 +173,10 @@ class ObjFunc:
                     f_vals=f_vals
                 )
                 history.append(history_entry)
+
+            if np.isnan(r):
+                flag = -3  # error, NAN encoutered
+                break
 
             if r > r_upper:
                 u = h
@@ -169,15 +196,17 @@ class ObjFunc:
             else:
                 h = h_new
 
-            f_vals = np.array([self.__call__(x + s * h) for s in shift])
+            f_vals = np.array([self.__call__(x + s * h) for s in scheme.r_shift])
 
         else:
-            flag = -1
+            flag = -1  # max iter exceeded
 
         num_eval = self.num_eval - num_eval
+        num_eval_no_cache = self.num_eval_no_cache - num_eval_no_cache
 
-        if est_coeff is not None and est_shift is not None and est_h_power is not None:
-            estimated = np.array([self.__call__(x + s * h) for s in est_shift]).dot(est_coeff) / (h ** est_h_power)
+        if scheme.est_coeff is not None and scheme.est_shift is not None and est_order is not None:
+            estimated = np.array([self.__call__(x + s * h) for s in scheme.est_shift]).dot(scheme.est_coeff) / (
+                        h ** est_order)
         else:
             estimated = None
 
@@ -189,13 +218,16 @@ class ObjFunc:
             error = None
             rel_error = None
 
-        return_dict = dict(
-            scheme=scheme_name,
+        result = AdaEstRes(
+            scheme_name=scheme.name,
             LS_flag=flag,
+            h_init=h_init,
             h=h,
+            h_opt=h_opt,
             r=r,
             n_iter=n_iter + 1,
             num_eval=num_eval,
+            num_eval_no_cache=num_eval_no_cache,
             estimated=estimated,
             acc=acc,
             error=error,
@@ -208,44 +240,7 @@ class ObjFunc:
         if save_history:
             self._last_ls_history = history
 
-        return return_dict
-
-    def ada_est(self,
-                x: float,
-                scheme: EstimatingScheme,
-                max_iter: int = 30,
-                eps_f: Optional[float] = None,
-                h_max: float = 1E10,
-                h_min: float = 1E-16,
-                save_history: bool = True,
-                ):
-
-        if eps_f is None:
-            eps_f = self.eps_f
-
-        if scheme.h_init_func is None:
-            h_init = eps_f
-        else:
-            h_init = scheme.h_init_func(eps_f)
-
-        return self._ada_general(
-            x=x,
-            r_lower=scheme.r_lower,
-            r_upper=scheme.r_upper,
-            shift=scheme.r_shift,
-            coeff=scheme.r_coeff,
-            h_init=h_init,
-            max_iter=max_iter,
-            eps_f=eps_f,
-            h_max=h_max,
-            h_min=h_min,
-            save_history=save_history,
-            est_order=scheme.est_order,
-            est_shift=scheme.est_shift,
-            est_coeff=scheme.est_coeff,
-            est_h_power=scheme.est_h_power,
-            scheme_name=scheme.name
-        )
+        return result
 
     def ada_est_gen_plot(
             self,
@@ -260,22 +255,22 @@ class ObjFunc:
             **extra_args,
     ) -> None:
 
-        ada_res = [self.ada_est(x=x, scheme=scheme, eps_f=eps_f, **extra_args) for i in range(num_samples)]
+        ada_res = [self.ada_est(x=x, scheme=scheme, eps_f=eps_f, **extra_args) for _ in range(num_samples)]
 
-        eps_f = ada_res[0]["eps_f"]
+        eps_f = ada_res[0].eps_f
 
-        h_ada = [res['h'] for res in ada_res]
+        h_ada = [res.h for res in ada_res]
 
         index_lower = int(np.floor(np.log(h_lower) / np.log(base)))
         index_upper = int(np.ceil(np.log(h_upper) / np.log(base)))
 
         hs = base ** np.arange(index_lower, index_upper + 1)
 
-        true_vale = ada_res[0]["acc"]
+        true_vale = ada_res[0].acc
 
         def worst_case_func(h):
             return (np.abs(scheme.est(obj=self.f, x=x, h=h) - true_vale) + np.abs(scheme.est_coeff).sum() * eps_f / (
-                        h ** scheme.est_h_power)) / np.abs(true_vale)
+                    h ** scheme.est_order)) / np.abs(true_vale)
 
         worst_case_err = [worst_case_func(h) for h in hs]
 
@@ -284,9 +279,9 @@ class ObjFunc:
 
             color = next(ax._get_lines.prop_cycler)['color']
             if num_samples == 1:
-                label_str = "{} (h={:.2E})".format(scheme.name, ada_res[0]['h'])
+                label_str = "{} (h={:.2E})".format(scheme.name, ada_res[0].h)
                 alpha = 1.0
-                linestyle='--'
+                linestyle = '--'
             else:
                 label_str = "{} (h in {:.2E}~{:.2E}".format(scheme.name, min(h_ada), max(h_ada))
                 alpha = .3
@@ -309,3 +304,24 @@ class ObjFunc:
             plt.xlabel("scaling factor $h$")
             plt.ylabel("worst case relative error")
             plt.legend()
+
+    def optimal_h(self, x: float, scheme: EstimatingScheme, eps_f: Optional[float] = None) -> float:
+
+        tol = 1E-10
+
+        if eps_f is None:
+            eps_f = self.eps_f
+
+        O_R = scheme.err_order
+        O_E = scheme.est_order
+
+        L_R = np.abs(sp.lambdify(self.x, sp.diff(self.f_expr, self.x, O_R), "numpy")(x))
+
+        if L_R < tol:
+            return np.inf
+
+        C_E = np.abs(scheme.est_coeff.dot(scheme.est_shift ** O_R)) / math.factorial(O_R)
+
+        S_E = np.abs(scheme.est_coeff).sum()
+
+        return ((O_E * S_E * eps_f) / (C_E * (O_R - O_E) * L_R)) ** (1 / O_R)

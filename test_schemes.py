@@ -21,7 +21,7 @@ h_lower, h_upper = 1E-3, 1E0
 for scheme in [FD, FD3P, FD4P, CD, CD4P]:
     func1.ada_est_gen_plot(x=-8., scheme=scheme, h_lower=h_lower, h_upper=h_upper)
 plt.tight_layout()
-plt.savefig(f"figs/func_{i}.png", dpi=400, transparent=True)
+# plt.savefig(f"figs/func_{i}.png", dpi=400, transparent=True)
 plt.show()
 
 i += 1
@@ -31,7 +31,7 @@ for scheme in [FD, FD3P, FD4P, CD, CD4P]:
                            h_lower=h_lower, h_upper=h_upper
     )
 plt.tight_layout()
-plt.savefig(f"figs/func_{i}.png", dpi=400, transparent=True)
+# plt.savefig(f"figs/func_{i}.png", dpi=400, transparent=True)
 plt.show()
 
 
@@ -42,7 +42,7 @@ for scheme in [FD, FD3P, FD4P, CD, CD4P]:
                            h_lower=h_lower, h_upper=h_upper
     )
 plt.tight_layout()
-plt.savefig(f"figs/func_{i}.png", dpi=400, transparent=True)
+# plt.savefig(f"figs/func_{i}.png", dpi=400, transparent=True)
 plt.show()
 
 i += 1
@@ -64,9 +64,6 @@ plt.savefig(f"figs/func_{i}.png", dpi=400, transparent=True)
 plt.show()
 
 for func, xp in test_set:
-    print(f"\n{large_sep}\n")
-    func.enable_cache = True
-    print(f"f(x) = {func.f_expr}, x = {xp}, eps_f = {func.eps_f}")
-    print(f"{sep} with cache {sep}\n", pd.DataFrame([func.ada_est(x=xp, scheme=s) for s in schemes]).to_string())
-    func.enable_cache = False
-    print(f"{sep} without cache {sep}\n", pd.DataFrame([func.ada_est(x=xp, scheme=s) for s in schemes]).to_string())
+    print(f"\n{large_sep}")
+    print(f"f(x) = {func.f_expr}, x = {xp}, eps_f = {func.eps_f}\n")
+    print(pd.DataFrame([func.ada_est(x=xp, scheme=s) for s in schemes]).to_string())
